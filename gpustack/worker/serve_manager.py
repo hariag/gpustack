@@ -1,10 +1,13 @@
+import asyncio
 import multiprocessing
 import psutil
+import requests
 import setproctitle
 import os
-import time
-from typing import Dict
+from typing import Dict, Optional
 import logging
+
+import tenacity
 
 
 from gpustack.api.exceptions import NotFoundException
@@ -20,6 +23,7 @@ from gpustack.worker.backends.vllm import VLLMServer
 from gpustack.client import ClientSet
 from gpustack.schemas.models import (
     BackendEnum,
+    Model,
     ModelInstance,
     ModelInstanceUpdate,
     ModelInstanceStateEnum,
@@ -29,6 +33,10 @@ from gpustack.server.bus import Event, EventType
 
 
 logger = logging.getLogger(__name__)
+
+
+class WorkerNotFoundError(Exception):
+    pass
 
 
 class ServeManager:
@@ -41,46 +49,63 @@ class ServeManager:
         self._worker_name = worker_name
         self._config = cfg
         self._serve_log_dir = f"{cfg.log_dir}/serve"
-        self._serving_model_instances: Dict[str, multiprocessing.Process] = {}
+        self._serving_model_instances: Dict[int, multiprocessing.Process] = {}
+        self._serving_model_instance_ports: Dict[int, int] = {}
+        self._starting_model_instances: Dict[int, ModelInstance] = {}
+        self._model_cache_by_instance: Dict[int, Model] = {}
         self._clientset = clientset
         self._cache_dir = cfg.cache_dir
 
         os.makedirs(self._serve_log_dir, exist_ok=True)
 
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_fixed(2),
+        reraise=True,
+        before_sleep=lambda retry_state: logger.debug(
+            f"Retrying to get worker ID (attempt {retry_state.attempt_number}) due to: {retry_state.outcome.exception()}"
+        ),
+    )
     def _get_current_worker_id(self):
-        for _ in range(3):
-            workers = None
+        workers = self._clientset.workers.list()
+
+        if workers and workers.items:
+            for worker in workers.items:
+                if worker.name == self._worker_name:
+                    self._worker_id = worker.id
+                    logger.debug(f"Successfully found worker ID: {worker.id}")
+                    return
+
+        raise WorkerNotFoundError(f"Worker {self._worker_name} not found.")
+
+    async def watch_model_instances(self):
+        while True:
             try:
-                workers = self._clientset.workers.list()
+                if not hasattr(self, "_worker_id"):
+                    self._get_current_worker_id()
+
+                await asyncio.sleep(5)
+                logger.info("Started watching model instances.")
+                await self._clientset.model_instances.awatch(
+                    callback=self._handle_model_instance_event
+                )
+            except asyncio.CancelledError:
+                break
+            except WorkerNotFoundError:
+                raise
             except Exception as e:
-                logger.debug(f"Failed to get workers: {e}")
-
-            if workers:
-                for worker in workers.items:
-                    if worker.name == self._worker_name:
-                        self._worker_id = worker.id
-                        break
-            time.sleep(1)
-
-        if not hasattr(self, "_worker_id"):
-            raise Exception("Failed to get current worker id.")
-
-    def watch_model_instances(self):
-        if not hasattr(self, "_worker_id"):
-            self._get_current_worker_id()
-
-        logger.debug("Started watching model instances.")
-
-        self._clientset.model_instances.watch(
-            callback=self._handle_model_instance_event
-        )
+                logger.error(f"Failed watching model instances: {e}")
 
     def _handle_model_instance_event(self, event: Event):
-        mi = ModelInstance(**event.data)
+        mi = ModelInstance.model_validate(event.data)
 
         if mi.worker_id != self._worker_id:
             # Ignore model instances that are not assigned to this worker node.
             return
+
+        logger.trace(
+            f"Received model instance event: {event.type} {mi.name} {mi.state}"
+        )
 
         if mi.state == ModelInstanceStateEnum.ERROR:
             return
@@ -108,14 +133,21 @@ class ServeManager:
 
         try:
             if mi.port is None:
-                mi.port = network.get_free_port()
+                mi.port = network.get_free_port(
+                    port_range=self._config.service_port_range,
+                    unavailable_ports=set(self._serving_model_instance_ports.values()),
+                )
 
             logger.info(f"Start serving model instance {mi.name} on port {mi.port}")
+
+            model = self._clientset.models.get(mi.model_id)
+            backend = get_backend(model)
 
             process = multiprocessing.Process(
                 target=ServeManager.serve_model_instance,
                 args=(
                     mi,
+                    backend,
                     self._clientset.headers,
                     log_file_path,
                     self._config,
@@ -124,6 +156,9 @@ class ServeManager:
             process.daemon = False
             process.start()
             self._serving_model_instances[mi.id] = process
+            self._serving_model_instance_ports[mi.id] = mi.port
+            self._starting_model_instances[mi.id] = mi
+            self._model_cache_by_instance[mi.id] = model
 
             patch_dict = {
                 "state": ModelInstanceStateEnum.INITIALIZING,
@@ -148,6 +183,7 @@ class ServeManager:
     @staticmethod
     def serve_model_instance(
         mi: ModelInstance,
+        backend: BackendEnum,
         client_headers: dict,
         log_file_path: str,
         cfg: Config,
@@ -197,12 +233,12 @@ class ServeManager:
             except Exception as e:
                 logger.error(f"Failed to terminate process {pid}: {e}")
 
-            self._serving_model_instances.pop(id)
+            self._post_stop_model_instance(id)
 
-    def monitor_processes(self):
-        for id in list(self._serving_model_instances.keys()):
-            process = self._serving_model_instances[id]
+    def health_check_serving_instances(self):
+        for id, process in list(self._serving_model_instances.items()):
             if not process.is_alive():
+                # monitor inference server process exit
                 exitcode = process.exitcode
                 try:
                     mi = self._clientset.model_instances.get(id=id)
@@ -216,4 +252,38 @@ class ServeManager:
                     pass
                 except Exception:
                     logger.error(f"Failed to update model instance {id} state.")
-                self._serving_model_instances.pop(id)
+                self._post_stop_model_instance(id)
+            elif id in self._starting_model_instances:
+                # health check for starting model instances
+                mi = self._starting_model_instances[id]
+                model = self._model_cache_by_instance[id]
+                if is_running(mi, model.backend):
+                    mi = self._clientset.model_instances.get(id=id)
+                    if mi.state != ModelInstanceStateEnum.ERROR:
+                        self._update_model_instance(
+                            id, state=ModelInstanceStateEnum.RUNNING
+                        )
+                    self._starting_model_instances.pop(id, None)
+
+    def _post_stop_model_instance(self, id: str):
+        self._serving_model_instances.pop(id, None)
+        self._serving_model_instance_ports.pop(id, None)
+        self._starting_model_instances.pop(id, None)
+        self._model_cache_by_instance.pop(id, None)
+
+
+def is_running(mi: ModelInstance, backend: Optional[str]) -> bool:
+    try:
+        # Check /v1/models by default if dedicated health check endpoint is not available.
+        # This is served by all backends (llama-box, vox-box, vllm)
+        health_check_url = f"http://127.0.0.1:{mi.port}/v1/models"
+        if backend == BackendEnum.LLAMA_BOX:
+            # For llama-box, use /health to avoid printing error logs.
+            health_check_url = f"http://127.0.0.1:{mi.port}/health"
+
+        response = requests.get(health_check_url, timeout=1)
+        if response.status_code == 200:
+            return True
+    except Exception:
+        pass
+    return False

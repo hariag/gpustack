@@ -1,7 +1,9 @@
 from abc import ABC, abstractmethod
 import asyncio
 from gpustack.config.config import Config
+from gpustack.utils.convert import safe_int
 from gpustack.utils.file import get_local_file_size_in_byte
+from gpustack.utils.gpu import parse_gpu_id
 from gpustack.worker.backends.base import get_file_size as get_remote_file_size
 from typing import Dict, List
 import os
@@ -42,11 +44,26 @@ class VoxBoxResourceFitSelector(ScheduleCandidatesSelector):
         self._model = model
         self._model_instance = model_instance
         self._cache_dir = cache_dir
+        self._messages = []
 
         self._gpu_ram_claim = 0
         self._gpu_vram_claim = 0
         self._cpu_ram_claim = 0
         self._required_os = None
+        self._selected_gpu_worker = None
+        self._selected_gpu_index = None
+
+        if self._model.gpu_selector and self._model.gpu_selector.gpu_ids:
+            valid, match = parse_gpu_id(self._model.gpu_selector.gpu_ids[0])
+            if valid:
+                self._selected_gpu_worker = match.get("worker_name")
+                self._selected_gpu_index = safe_int(match.get("gpu_index"))
+
+    def _set_messages(self):
+        self._messages = ["No workers meet the resource requirements."]
+
+    def get_messages(self) -> str:
+        return self._messages
 
     async def select_candidates(
         self, workers: List[Worker]
@@ -87,6 +104,7 @@ class VoxBoxResourceFitSelector(ScheduleCandidatesSelector):
             if candidates:
                 return candidates
 
+        self._set_messages()
         return []
 
     async def find_single_worker_single_gpu_candidates(
@@ -114,6 +132,10 @@ class VoxBoxResourceFitSelector(ScheduleCandidatesSelector):
         Find single worker single gpu candidates for the model instance with worker.
         requires: worker.status.gpu_devices is not None
         """
+
+        if self._selected_gpu_worker and worker.name != self._selected_gpu_worker:
+            return []
+
         candidates = []
 
         if (
@@ -123,7 +145,9 @@ class VoxBoxResourceFitSelector(ScheduleCandidatesSelector):
         ):
             return []
 
-        allocatable = await get_worker_allocatable_resource(self._engine, worker)
+        allocatable = await get_worker_allocatable_resource(
+            self._engine, worker, self._model_instance
+        )
         is_unified_memory = worker.status.memory.is_unified_memory
 
         if self._gpu_ram_claim > allocatable.ram:
@@ -131,6 +155,12 @@ class VoxBoxResourceFitSelector(ScheduleCandidatesSelector):
 
         if worker.status.gpu_devices:
             for _, gpu in enumerate(worker.status.gpu_devices):
+                if (
+                    self._selected_gpu_index is not None
+                    and gpu.index != self._selected_gpu_index
+                ):
+                    continue
+
                 if gpu.vendor != VendorEnum.NVIDIA.value:
                     continue
 
@@ -184,7 +214,9 @@ class VoxBoxResourceFitSelector(ScheduleCandidatesSelector):
         ):
             return []
 
-        allocatable = await get_worker_allocatable_resource(self._engine, worker)
+        allocatable = await get_worker_allocatable_resource(
+            self._engine, worker, self._model_instance
+        )
         is_unified_memory = worker.status.memory.is_unified_memory
 
         if self._cpu_ram_claim > allocatable.ram:
@@ -205,10 +237,14 @@ class VoxBoxResourceFitSelector(ScheduleCandidatesSelector):
 
 def estimate_model_resource(cfg: Config, model: Model, cache_dir: str) -> dict:
     try:
-        from vox_box.elstimator.estimate import estimate_model
+        from vox_box.estimator.estimate import estimate_model
         from vox_box.config import Config as VoxBoxConfig
     except ImportError:
         raise Exception("vox_box is not installed.")
+
+    if model.local_path is not None and not os.path.exists(model.local_path):
+        logger.debug(f"Model {model.name} local path {model.local_path} does not exist")
+        return
 
     box_cfg = VoxBoxConfig()
     box_cfg.cache_dir = cache_dir
@@ -220,6 +256,10 @@ def estimate_model_resource(cfg: Config, model: Model, cache_dir: str) -> dict:
         model_dict = estimate_model(box_cfg)
     except Exception as e:
         logger.error(f"Failed to estimate model {model.name}: {e}")
+        return
+
+    if model_dict is None:
+        logger.debug(f"model_dict is empty after estimate model {model.name}")
         return
 
     framework = model_dict.get("backend_framework", "")

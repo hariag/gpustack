@@ -62,6 +62,7 @@ nav:
   - Overview: overview.md
   - Quickstart: quickstart.md
   - Installation:
+      - Installation Requirements: installation/installation-requirements.md
       - Installation Script: installation/installation-script.md
       - Docker Installation: installation/docker-installation.md
       - Manual Installation: installation/manual-installation.md
@@ -77,6 +78,7 @@ nav:
           - Embedding: user-guide/playground/embedding.md
           - Rerank: user-guide/playground/rerank.md
       - Model Management: user-guide/model-management.md
+      - Model Catalog: user-guide/model-catalog.md
       - API Key Management: user-guide/api-key-management.md
       - User Management: user-guide/user-management.md
       - Inference Backends: user-guide/inference-backends.md
@@ -86,17 +88,22 @@ nav:
       - Rerank API: user-guide/rerank-api.md
   - Tutorials:
       - Setting Up a Multi-node GPUStack Cluster: tutorials/setting-up-a-multi-node-gpustack-cluster.md
-      - Performing Distributed Inference Across Workers: tutorials/performing-distributed-inference-across-workers.md
-      - Using Vision Language Models: tutorials/using-vision-language-models.md
+      - Performing Distributed Inference Across Workers(llama-box): tutorials/performing-distributed-inference-across-workers-llama-box.md
+      - Using DeepSeek R1: tutorials/using-deepseek-r1.md
       - Using Image Generation Models: tutorials/using-image-generation-models.md
       - Using Audio Models: tutorials/using-audio-models.md
       - Using Reranker Models: tutorials/using-reranker-models.md
-      - Inference on CPUs: tutorials/inference-on-cpus.md
-      - Running Inference with Ascend NPUs: tutorials/running-inference-with-ascend-npus.md
-      - Running on Copilot+ PCs with Snapdragon X: tutorials/running-on-copilot-plus-pcs-with-snapdragon-x.md
+      - Using Vision Language Models: tutorials/using-vision-language-models.md
+      - Recommended Parameters for Image Generation Models: tutorials/recommended-parameters-for-image-generation-models.md
+      - Editing Images: tutorials/editing-images.md
       - Creating Text Embeddings: tutorials/creating-text-embeddings.md
-      - Inference with Function Calling: tutorials/inference-with-function-calling.md
+      - Inference with Tool Calling: tutorials/inference-with-tool-calling.md
+      - Running Inference with Ascend NPUs: tutorials/running-inference-with-ascend-npus.md
+      - Running Inference with Hygon DCUs: tutorials/running-inference-with-hygon-dcus.md
+      - Running Inference with AMD GPUs: tutorials/running-inference-with-amd-gpus.md
+      - Running on Copilot+ PCs with Snapdragon X: tutorials/running-on-copilot-plus-pcs-with-snapdragon-x.md
       - Running Inference with Moore Threads GPUs: tutorials/running-inference-with-moorethreads-gpus.md
+      - Running Inference on CPUs: tutorials/inference-on-cpus.md
   - Architecture: architecture.md
   - Scheduler: scheduler.md
   - Troubleshooting: troubleshooting.md

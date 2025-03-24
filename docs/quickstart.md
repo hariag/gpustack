@@ -4,7 +4,7 @@
 
 ### Linux or macOS
 
-GPUStack provides a script to install it as a service on systemd or launchd based systems. To install GPUStack using this method, just run:
+GPUStack provides a script to install it as a service on systemd or launchd based systems with default port 80. To install GPUStack using this method, just run:
 
 ```bash
 curl -sfL https://get.gpustack.ai | sh -s -
@@ -60,7 +60,7 @@ cat /var/lib/gpustack/initial_admin_password
 Get-Content -Path "$env:APPDATA\gpustack\initial_admin_password" -Raw
 ```
 
-3. Click `Playground` in the navigation menu. Now you can chat with the LLM in the UI playground.
+3. Click `Playground - Chat` in the navigation menu. Now you can chat with the LLM in the UI playground.
 
 ![Playground Screenshot](assets/playground-screenshot.png)
 

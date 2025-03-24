@@ -1,10 +1,12 @@
 import logging
-from typing import List
+from typing import List, Optional
 from pathlib import Path
 import fnmatch
 from huggingface_hub import HfFileSystem
 from huggingface_hub.utils import validate_repo_id
 from modelscope.hub.api import HubApi
+from transformers import PretrainedConfig
+from huggingface_hub import HfApi
 
 from gpustack.config.config import get_global_config
 from gpustack.schemas.models import Model, SourceEnum
@@ -12,10 +14,15 @@ from gpustack.schemas.models import Model, SourceEnum
 logger = logging.getLogger(__name__)
 
 
-def match_hugging_face_files(repo_id: str, filename: str) -> List[str]:
+def match_hugging_face_files(
+    repo_id: str,
+    filename: str,
+    extra_filename: Optional[str] = None,
+    token: Optional[str] = None,
+) -> List[str]:
     validate_repo_id(repo_id)
 
-    hffs = HfFileSystem()
+    hffs = HfFileSystem(token=token)
 
     files = [
         file["name"] if isinstance(file, dict) else file
@@ -29,25 +36,89 @@ def match_hugging_face_files(repo_id: str, filename: str) -> List[str]:
 
     matching_files = [file for file in file_list if fnmatch.fnmatch(file, filename)]  # type: ignore
     matching_files = sorted(matching_files)
+
+    if extra_filename is None:
+        return matching_files
+
+    extra_matching_files = [
+        file for file in file_list if fnmatch.fnmatch(file, extra_filename)
+    ]
+    extra_matching_files = sorted(extra_matching_files, reverse=True)
+    if extra_matching_files:
+        # Add the first element of the extra matching files to the matching files
+        # For example, when matches f16 and f32 mmproj files, prefer f32 over f16
+        matching_files.append(extra_matching_files[0])
+
     return matching_files
 
 
-def match_model_scope_file_paths(model_id: str, file_path: str) -> List[str]:
+def match_model_scope_file_paths(
+    model_id: str, file_path: str, extra_file_path: Optional[str] = None
+) -> List[str]:
     if '/' in file_path:
         root, _ = file_path.rsplit('/', 1)
     else:
         root = None
 
     api = HubApi()
-    files = api.get_model_files(model_id, root=root)
+    files = api.get_model_files(model_id, root=root, recursive=True)
 
     file_paths = [file["Path"] for file in files]
     matching_paths = [p for p in file_paths if fnmatch.fnmatch(p, file_path)]
     matching_paths = sorted(matching_paths)
+
+    if extra_file_path is None:
+        return matching_paths
+
+    extra_matching_paths = [
+        p for p in file_paths if fnmatch.fnmatch(p, extra_file_path)
+    ]
+    extra_matching_paths = sorted(extra_matching_paths, reverse=True)
+    if extra_matching_paths:
+        # Add the first element of the extra matching paths to the matching paths
+        # For example, when matches f16 and f32 mmproj files, prefer f32 over f16
+        matching_paths.append(extra_matching_paths[0])
+
     return matching_paths
 
 
-def get_pretrained_config(model: Model):
+def get_model_weight_size(model: Model, token: Optional[str] = None) -> int:
+    """
+    Get the size of the model weights. This is the sum of all the weight files with extensions
+    .safetensors, .bin, .pt, .pth.
+    Args:
+        model: Model to get the weight size for
+        token: Optional Hugging Face API token
+    Returns:
+        int: The size of the model weights
+    """
+    if model.env and model.env['GPUSTACK_MODEL_WEIGHT_SIZE']:
+        # Use as a potential workaround if the model weight size is not expected.
+        return int(model.env['GPUSTACK_MODEL_WEIGHT_SIZE'])
+
+    weight_file_extensions = (".safetensors", ".bin", ".pt", ".pth")
+    if model.source == SourceEnum.HUGGING_FACE:
+        api = HfApi(token=token)
+        repo_info = api.repo_info(model.huggingface_repo_id, files_metadata=True)
+        total_size = sum(
+            sibling.size
+            for sibling in repo_info.siblings
+            if sibling.size is not None
+            and sibling.rfilename.endswith(weight_file_extensions)
+        )
+        return total_size
+    elif model.source == SourceEnum.MODEL_SCOPE:
+        api = HubApi()
+        files = api.get_model_files(model.model_scope_model_id, recursive=True)
+
+        return sum(
+            file["Size"]
+            for file in files
+            if file["Name"].endswith(weight_file_extensions)
+        )
+
+
+def get_pretrained_config(model: Model, **kwargs):
     """
     Get the pretrained config of the model from Hugging Face or ModelScope.
     Args:
@@ -55,7 +126,9 @@ def get_pretrained_config(model: Model):
     """
 
     trust_remote_code = False
-    if model.backend_parameters and "--trust-remote-code" in model.backend_parameters:
+    if (
+        model.backend_parameters and "--trust-remote-code" in model.backend_parameters
+    ) or kwargs.get("trust_remote_code"):
         trust_remote_code = True
 
     global_config = get_global_config()
@@ -91,7 +164,7 @@ def get_pretrained_config(model: Model):
 # Simplified from vllm.config._get_and_verify_max_len
 # Keep in our codebase to avoid dependency on vllm's internal
 # APIs which may change unexpectedly.
-# https://github.com/vllm-project/vllm/blob/v0.6.2/vllm/config.py#L1668
+# https://github.com/vllm-project/vllm/blob/v0.7.3/vllm/config.py#L2453
 def get_max_model_len(pretrained_config) -> int:  # noqa: C901
     """Get the model's maximum length."""
     derived_max_model_len = float("inf")
@@ -106,6 +179,8 @@ def get_max_model_len(pretrained_config) -> int:  # noqa: C901
         "seq_length",
         # Command-R
         "model_max_length",
+        # Whisper
+        "max_target_positions",
         # Others
         "max_sequence_length",
         "max_seq_length",
@@ -153,3 +228,17 @@ def get_max_model_len(pretrained_config) -> int:  # noqa: C901
 
     logger.debug(f"Derived max model length: {derived_max_model_len}")
     return int(derived_max_model_len)
+
+
+# Similar to https://github.com/vllm-project/vllm/blob/v0.7.3/vllm/transformers_utils/config.py#L700,
+# But we don't assert and fail if num_attention_heads is missing.
+def get_hf_text_config(config: PretrainedConfig):
+    """Get the "sub" config relevant to llm for multi modal models.
+    No op for pure text models.
+    """
+    if hasattr(config, "text_config") and hasattr(
+        config.text_config, "num_attention_heads"
+    ):
+        return config.text_config
+    else:
+        return config

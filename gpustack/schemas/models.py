@@ -1,13 +1,15 @@
 from datetime import datetime
 from enum import Enum
-from typing import Dict, List, Optional
-from pydantic import BaseModel, ConfigDict, model_validator
+from pathlib import Path
+from typing import Annotated, Any, Dict, List, Optional
+from pydantic import BaseModel, ConfigDict, model_validator, Field as PydanticField
 from sqlalchemy import JSON, Column
 from sqlmodel import Field, Relationship, SQLModel
 
 from gpustack.schemas.common import PaginatedList, pydantic_column_type
 from gpustack.mixins import BaseModelMixin
 from gpustack.schemas.workers import RPCServer
+from gpustack.utils.command import find_parameter
 
 # Models
 
@@ -17,6 +19,15 @@ class SourceEnum(str, Enum):
     OLLAMA_LIBRARY = "ollama_library"
     MODEL_SCOPE = "model_scope"
     LOCAL_PATH = "local_path"
+
+
+class CategoryEnum(str, Enum):
+    LLM = "llm"
+    EMBEDDING = "embedding"
+    IMAGE = "image"
+    RERANKER = "reranker"
+    SPEECH_TO_TEXT = "speech_to_text"
+    TEXT_TO_SPEECH = "text_to_speech"
 
 
 class PlacementStrategyEnum(str, Enum):
@@ -31,9 +42,8 @@ class BackendEnum(str, Enum):
 
 
 class GPUSelector(BaseModel):
-    worker_name: str
-    gpu_index: int
-    gpu_name: Optional[str] = None
+    # format of each element: "worker_name:device:gpu_index", example: "worker1:cuda:0"
+    gpu_ids: Optional[List[str]] = None
 
 
 class ModelSource(BaseModel):
@@ -78,12 +88,31 @@ class ModelSource(BaseModel):
 class ModelBase(SQLModel, ModelSource):
     name: str = Field(index=True, unique=True)
     description: Optional[str] = None
+    meta: Optional[Dict[str, Any]] = Field(sa_column=Column(JSON), default={})
 
     replicas: int = Field(default=1, ge=0)
     ready_replicas: int = Field(default=0, ge=0)
-    embedding_only: bool = False
-    image_only: bool = False
-    reranker: bool = False
+    categories: List[str] = Field(sa_column=Column(JSON), default=[])
+    embedding_only: Annotated[
+        bool,
+        PydanticField(default=False, deprecated="Deprecated, use categories instead"),
+    ]
+    image_only: Annotated[
+        bool,
+        PydanticField(default=False, deprecated="Deprecated, use categories instead"),
+    ]
+    reranker: Annotated[
+        bool,
+        PydanticField(default=False, deprecated="Deprecated, use categories instead"),
+    ]
+    speech_to_text: Annotated[
+        bool,
+        PydanticField(default=False, deprecated="Deprecated, use categories instead"),
+    ]
+    text_to_speech: Annotated[
+        bool,
+        PydanticField(default=False, deprecated="Deprecated, use categories instead"),
+    ]
     placement_strategy: PlacementStrategyEnum = PlacementStrategyEnum.SPREAD
     cpu_offloading: bool = False
     distributed_inference_across_workers: bool = False
@@ -93,12 +122,12 @@ class ModelBase(SQLModel, ModelSource):
     gpu_selector: Optional[GPUSelector] = Field(
         sa_column=Column(pydantic_column_type(GPUSelector)), default=None
     )
-    speech_to_text: bool = False
-    text_to_speech: bool = False
 
     backend: Optional[str] = None
     backend_version: Optional[str] = None
     backend_parameters: Optional[List[str]] = Field(sa_column=Column(JSON), default=[])
+
+    env: Optional[Dict[str, str]] = Field(sa_column=Column(JSON), default={})
 
     @model_validator(mode="after")
     def validate(self):
@@ -159,11 +188,13 @@ ModelsPublic = PaginatedList[ModelPublic]
 class ModelInstanceStateEnum(str, Enum):
     INITIALIZING = "initializing"
     PENDING = "pending"
+    STARTING = "starting"
     RUNNING = "running"
     SCHEDULED = "scheduled"
     ERROR = "error"
     DOWNLOADING = "downloading"
     ANALYZING = "analyzing"
+    UNREACHABLE = "unreachable"
 
 
 class ComputedResourceClaim(BaseModel):
@@ -172,6 +203,7 @@ class ComputedResourceClaim(BaseModel):
     total_layers: Optional[int] = None
     ram: Optional[int] = Field(default=None)  # in bytes
     vram: Optional[Dict[int, int]] = Field(default=None)  # in bytes
+    tensor_split: Optional[List[int]] = Field(default=None)
 
 
 class ModelInstanceRPCServer(RPCServer):
@@ -181,10 +213,22 @@ class ModelInstanceRPCServer(RPCServer):
     )
 
 
+class RayActor(BaseModel):
+    worker_id: Optional[int] = None
+    worker_ip: Optional[str] = None
+    total_gpus: Optional[int] = None
+    gpu_indexes: Optional[List[int]] = None
+    computed_resource_claim: Optional[ComputedResourceClaim] = Field(
+        sa_column=Column(pydantic_column_type(ComputedResourceClaim)), default=None
+    )
+
+
 class DistributedServers(BaseModel):
     rpc_servers: Optional[List[ModelInstanceRPCServer]] = Field(
         sa_column=Column(JSON), default=[]
     )
+
+    ray_actors: Optional[List[RayActor]] = Field(sa_column=Column(JSON), default=[])
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -281,11 +325,42 @@ def is_audio_model(model: Model):
     Args:
         model: Model to check.
     """
-    return (
-        model.speech_to_text
-        or model.text_to_speech
-        or model.backend == BackendEnum.VOX_BOX
-    )
+    if model.backend == BackendEnum.VOX_BOX:
+        return True
+
+    if model.categories:
+        return (
+            'speech_to_text' in model.categories or 'text_to_speech' in model.categories
+        )
+
+    return False
+
+
+def is_image_model(model: Model):
+    """
+    Check if the model is an image model.
+    Args:
+        model: Model to check.
+    """
+    return "image" in model.categories
+
+
+def is_embedding_model(model: Model):
+    """
+    Check if the model is an embedding model.
+    Args:
+        model: Model to check.
+    """
+    return "embedding" in model.categories
+
+
+def is_renaker_model(model: Model):
+    """
+    Check if the model is a reranker model.
+    Args:
+        model: Model to check.
+    """
+    return "reranker" in model.categories
 
 
 def get_backend(model: Model) -> str:
@@ -299,3 +374,18 @@ def get_backend(model: Model) -> str:
         return BackendEnum.VOX_BOX
 
     return BackendEnum.VLLM
+
+
+def get_mmproj_filename(model: Model) -> Optional[str]:
+    """
+    Get the mmproj filename for the model. If the mmproj is not provided in the model's
+    backend parameters, it will try to find the default mmproj file.
+    """
+    if get_backend(model) != BackendEnum.LLAMA_BOX:
+        return None
+
+    mmproj = find_parameter(model.backend_parameters, ["mmproj"])
+    if mmproj and Path(mmproj).name == mmproj:
+        return mmproj
+
+    return "*mmproj*.gguf"

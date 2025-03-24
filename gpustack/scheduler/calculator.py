@@ -4,12 +4,18 @@ import logging
 import os
 import subprocess
 from dataclasses import dataclass
+import time
 from typing import List, Optional
 from dataclasses_json import dataclass_json
 
 
 from gpustack.config.config import get_global_config
-from gpustack.schemas.models import Model, ModelInstance, SourceEnum
+from gpustack.schemas.models import (
+    Model,
+    ModelInstance,
+    SourceEnum,
+    get_mmproj_filename,
+)
 from gpustack.utils.command import find_bool_parameter, find_parameter
 from gpustack.utils.compat_importlib import pkg_resources
 from gpustack.utils.hub import match_hugging_face_files, match_model_scope_file_paths
@@ -40,6 +46,20 @@ class memoryEstimate:
     ram: layerMemoryEstimate
     vrams: List[layerMemoryEstimate]
     offloadLayers: Optional[int] = None  # Not available for diffusion models
+
+    def to_log_string(self) -> str:
+        vram_strings = ', '.join(
+            [
+                f"(uma:{vram.uma}, non-uma:{vram.nonuma}, layers:{vram.handleLayers})"
+                for vram in self.vrams
+            ]
+        )
+        return (
+            f"layers: {self.offloadLayers}, "
+            f"{'full offloaded, ' if self.fullOffloaded else ''}"
+            f"ram: (uma:{self.ram.uma}, non-uma:{self.ram.nonuma}, layers:{self.ram.handleLayers}), "
+            f"vrams: [{vram_strings}]"
+        )
 
 
 @dataclass_json
@@ -135,6 +155,15 @@ def add_parameter_with_value(
             command_list.extend([flag_name, value])
 
 
+def _gguf_parser_env(model: Model) -> dict:
+    env = os.environ.copy()
+    if model.source == SourceEnum.HUGGING_FACE:
+        global_config = get_global_config()
+        if global_config.huggingface_token:
+            env["HF_TOKEN"] = str(global_config.huggingface_token)
+    return env
+
+
 async def _gguf_parser_command(  # noqa: C901
     model: Model, offload: GPUOffloadEnum = GPUOffloadEnum.Full, **kwargs
 ):
@@ -154,6 +183,8 @@ async def _gguf_parser_command(  # noqa: C901
         "--image-vae-tiling",
         "--cache-expiration",
         "168h0m0s",
+        "--platform-footprint",
+        "150,500",
         "--no-mmap",
         "--json",
     ]
@@ -182,6 +213,13 @@ async def _gguf_parser_command(  # noqa: C901
         execuable_command,
         "--image-no-vae-tiling",
     )
+    add_bool_flag(
+        model.backend_parameters,
+        ["flash-attention", "flash-attn", "fa", "diffusion-fa"],
+        execuable_command,
+        "--flash-attention",
+    )
+
     add_parameter_with_value(
         model.backend_parameters,
         ["image-max-height"],
@@ -193,6 +231,48 @@ async def _gguf_parser_command(  # noqa: C901
         ["image-max-width"],
         execuable_command,
         "--image-max-width",
+    )
+    add_parameter_with_value(
+        model.backend_parameters,
+        ["visual-max-image-size"],
+        execuable_command,
+        "--visual-max-image-size",
+    )
+    add_parameter_with_value(
+        model.backend_parameters,
+        ["cache-type-k", "ctk"],
+        execuable_command,
+        "--cache-type-k",
+    )
+    add_parameter_with_value(
+        model.backend_parameters,
+        ["cache-type-v", "ctv"],
+        execuable_command,
+        "--cache-type-v",
+    )
+    add_parameter_with_value(
+        model.backend_parameters,
+        ["batch-size", "b"],
+        execuable_command,
+        "--batch-size",
+    )
+    add_parameter_with_value(
+        model.backend_parameters,
+        ["ubatch-size", "ub"],
+        execuable_command,
+        "--ubatch-size",
+    )
+    add_parameter_with_value(
+        model.backend_parameters,
+        ["split-mode", "sm"],
+        execuable_command,
+        "--split-mode",
+    )
+    add_parameter_with_value(
+        model.backend_parameters,
+        ["platform-footprint"],
+        execuable_command,
+        "--platform-footprint",
     )
 
     cache_dir = kwargs.get("cache_dir")
@@ -250,13 +330,17 @@ async def calculate_model_resource_claim(
             estimate = _get_empty_estimate(n_gpu=len(tensor_split))
         return ModelInstanceResourceClaim(model_instance, estimate)
 
-    logger.info(f"Calculating resource claim for model instance {model_instance.name}")
-
     command = await _gguf_parser_command(model, offload, **kwargs)
+    env = _gguf_parser_env(model)
     try:
+        start_time = time.time()
+        logger.trace(
+            f"Running parser for model instance {model_instance.name} with command: {' '.join(map(str, command))}"
+        )
+
         process = await asyncio.create_subprocess_exec(
             *command,
-            env=os.environ.copy(),
+            env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -269,24 +353,25 @@ async def calculate_model_resource_claim(
             )
 
         cmd_output = stdout.decode()
-        claim = modelResoruceClaim.from_json(cmd_output)
+        claim: modelResoruceClaim = modelResoruceClaim.from_json(cmd_output)
+        latency = time.time() - start_time
 
         if offload == GPUOffloadEnum.Full:
-            logger.info(
-                f"Calculated resource claim for full offload model instance {model_instance.name}, "
-                f"claim: {claim.estimate.items[0]}"
+            logger.trace(
+                f"Finished running parser for full offload model instance {model_instance.name}, latency: {latency:.2f}, "
+                f"{claim.estimate.items[0].to_log_string()}"
             )
         elif offload == GPUOffloadEnum.Partial:
-            logger.info(
-                f"Calculated resource claim for partial offloading model instance {model_instance.name}, "
-                f"least claim: {claim.estimate.items[1]}, "
-                f"most claim: {claim.estimate.items[len(claim.estimate.items) - 2]}"
+            logger.trace(
+                f"Finished running parser for partial offloading model instance {model_instance.name}, latency: {latency:.2f}, at least: "
+                f"{claim.estimate.items[1].to_log_string() if len(claim.estimate.items) > 1 else claim.estimate.items[0].to_log_string()}"
             )
         elif offload == GPUOffloadEnum.Disable:
-            logger.info(
-                f"Calculated resource claim for disabled offloading model instance {model_instance.name}, "
-                f"claim: {claim.estimate.items[0]}"
+            logger.trace(
+                f"Finished running parser for disabled offloading model instance {model_instance.name}, latency: {latency:.2f}, "
+                f"{claim.estimate.items[0].to_log_string()}"
             )
+            clear_vram_claim(claim)
 
         return ModelInstanceResourceClaim(model_instance, claim.estimate)
 
@@ -300,6 +385,15 @@ async def calculate_model_resource_claim(
         raise Exception(
             f"Failed to parse the output of {command}, error: {e}",
         )
+
+
+def clear_vram_claim(claim: modelResoruceClaim):
+    for item in claim.estimate.items:
+        # gguf-parser provides vram claim when offloadLayers is 0 due to current llama.cpp behavior, but llama-box won't allocate such vram.
+        if item.offloadLayers == 0:
+            item.vrams = [
+                layerMemoryEstimate(uma=0, nonuma=0, handleLayers=0) for _ in item.vrams
+            ]
 
 
 async def _gguf_parser_command_args_from_source(  # noqa: C901
@@ -327,6 +421,8 @@ async def _gguf_parser_command_args_from_source(  # noqa: C901
                 args.extend(["-ol-base-url", ol_base_url])
             return args
         elif model.source == SourceEnum.HUGGING_FACE:
+            global_config = get_global_config()
+
             args = ["-hf-repo", model.huggingface_repo_id]
             if model.huggingface_filename:
                 model_filename = await asyncio.wait_for(
@@ -334,14 +430,22 @@ async def _gguf_parser_command_args_from_source(  # noqa: C901
                         hf_model_filename,
                         model.huggingface_repo_id,
                         model.huggingface_filename,
+                        global_config.huggingface_token,
                     ),
                     timeout=fetch_file_timeout_in_seconds,
                 )
                 args.extend(["-hf-file", model_filename])
 
-            global_config = get_global_config()
-            if global_config.huggingface_token:
-                args.extend(["-hf-token", global_config.huggingface_token])
+                mmproj_filename = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        hf_mmproj_filename,
+                        model,
+                        global_config.huggingface_token,
+                    ),
+                    timeout=fetch_file_timeout_in_seconds,
+                )
+                if mmproj_filename:
+                    args.extend(["--hf-mmproj-file", mmproj_filename])
 
             return args
         elif model.source == SourceEnum.MODEL_SCOPE:
@@ -353,7 +457,19 @@ async def _gguf_parser_command_args_from_source(  # noqa: C901
                 ),
                 timeout=fetch_file_timeout_in_seconds,
             )
-            return ["-ms-repo", model.model_scope_model_id, "-ms-file", file_path]
+            args = ["-ms-repo", model.model_scope_model_id, "-ms-file", file_path]
+
+            mmproj_file_path = await asyncio.wait_for(
+                asyncio.to_thread(
+                    model_scope_mmproj_file_path,
+                    model,
+                ),
+                timeout=fetch_file_timeout_in_seconds,
+            )
+            if mmproj_file_path:
+                args.extend(["--ms-mmproj-file", mmproj_file_path])
+
+            return args
         elif model.source == SourceEnum.LOCAL_PATH:
             return ["--path", model.local_path]
     except asyncio.TimeoutError:
@@ -362,19 +478,47 @@ async def _gguf_parser_command_args_from_source(  # noqa: C901
         raise Exception(f"Failed to get the file for model {model.name}, error: {e}")
 
 
-def hf_model_filename(repo_id: str, filename: Optional[str] = None) -> str | None:
+def hf_model_filename(
+    repo_id: str, filename: Optional[str] = None, token: Optional[str] = None
+) -> Optional[str]:
     if filename is None:
         return None
     else:
-        matching_files = match_hugging_face_files(repo_id, filename)
+        matching_files = match_hugging_face_files(repo_id, filename, None, token)
         if len(matching_files) == 0:
             raise ValueError(f"File {filename} not found in {repo_id}")
 
         return matching_files[0]
 
 
+def hf_mmproj_filename(model: Model, token: Optional[str] = None) -> Optional[str]:
+    mmproj_filename = get_mmproj_filename(model)
+    matching_files = match_hugging_face_files(
+        model.huggingface_repo_id, mmproj_filename, None, token
+    )
+    if len(matching_files) == 0:
+        return None
+
+    matching_files = sorted(matching_files, reverse=True)
+
+    return matching_files[0]
+
+
 def model_scope_file_path(model_id: str, file_path: str) -> str:
     file_paths = match_model_scope_file_paths(model_id, file_path)
     if len(file_paths) == 0:
         raise ValueError(f"File {file_path} not found in {model_id}")
+    return file_paths[0]
+
+
+def model_scope_mmproj_file_path(model: Model) -> Optional[str]:
+    mmproj_filename = get_mmproj_filename(model)
+    file_paths = match_model_scope_file_paths(
+        model.model_scope_model_id, mmproj_filename
+    )
+    if len(file_paths) == 0:
+        return None
+
+    file_paths = sorted(file_paths, reverse=True)
+
     return file_paths[0]

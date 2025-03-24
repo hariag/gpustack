@@ -1,7 +1,8 @@
 import logging
 import random
 import string
-from typing import List
+from typing import Any, Dict, List
+import httpx
 from sqlmodel.ext.asyncio.session import AsyncSession
 from gpustack.config.config import Config
 from gpustack.policies.scorers.offload_layer_scorer import OffloadLayerScorer
@@ -37,6 +38,9 @@ class ModelController:
         """
 
         async for event in Model.subscribe(self._engine):
+            if event.type == EventType.HEARTBEAT:
+                continue
+
             await self._reconcile(event)
 
     async def _reconcile(self, event: Event):
@@ -66,6 +70,9 @@ class ModelInstanceController:
         """
 
         async for event in ModelInstance.subscribe(self._engine):
+            if event.type == EventType.HEARTBEAT:
+                continue
+
             await self._reconcile(event)
 
     async def _reconcile(self, event: Event):
@@ -91,6 +98,16 @@ class ModelInstanceController:
                     await sync_replicas(session, model, self._config)
 
                 await model.refresh(session)
+
+                if (
+                    event.type == EventType.UPDATED
+                    and model_instance.state == ModelInstanceStateEnum.RUNNING
+                ):
+                    # fetch meta from running instance, if it's different from the model meta update it
+                    meta = await get_meta_from_running_instance(model_instance)
+                    if meta and meta != model.meta:
+                        model.meta = meta
+
                 await sync_ready_replicas(session, model)
 
         except Exception as e:
@@ -210,6 +227,41 @@ async def sync_ready_replicas(session: AsyncSession, model: Model):
         await model.update(session)
 
 
+async def get_meta_from_running_instance(mi: ModelInstance) -> Dict[str, Any]:
+    """
+    Get the meta information from the running instance.
+    """
+
+    if mi.state != ModelInstanceStateEnum.RUNNING:
+        return {}
+
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(f"http://{mi.worker_ip}:{mi.port}/v1/models")
+            response.raise_for_status()
+
+            models = response.json()
+            if "data" not in models or not models["data"]:
+                return {}
+
+            first_model = models["data"][0]
+            meta_info = first_model.get("meta", {})
+
+            # Optional keys from different backends
+            optional_keys = [
+                "voices",
+                "max_model_len",
+            ]
+            for key in optional_keys:
+                if key in first_model:
+                    meta_info[key] = first_model[key]
+
+            return meta_info
+        except Exception as e:
+            logger.error(f"Failed to get meta from running instance {mi.name}: {e}")
+            return {}
+
+
 class WorkerController:
     def __init__(self):
         self._engine = get_engine()
@@ -242,6 +294,29 @@ class WorkerController:
             if not instances:
                 return
 
+            instance_names = []
+            if worker.state == WorkerStateEnum.UNREACHABLE:
+                await self.update_instance_states(
+                    session,
+                    instances,
+                    ModelInstanceStateEnum.RUNNING,
+                    ModelInstanceStateEnum.UNREACHABLE,
+                    "Worker is unreachable from the server",
+                    "worker is unreachable from the server",
+                )
+                return
+
+            if worker.state == WorkerStateEnum.READY:
+                await self.update_instance_states(
+                    session,
+                    instances,
+                    ModelInstanceStateEnum.UNREACHABLE,
+                    ModelInstanceStateEnum.RUNNING,
+                    "",
+                    "worker is ready",
+                )
+                return
+
             if (
                 worker.state == WorkerStateEnum.NOT_READY
                 or event.type == EventType.DELETED
@@ -260,3 +335,26 @@ class WorkerController:
                         f"Delete instance {', '.join(instance_names)} "
                         f"since worker {worker.name} is {state}"
                     )
+
+    async def update_instance_states(
+        self,
+        session,
+        instances,
+        old_state,
+        new_state,
+        new_state_message,
+        log_update_reason,
+    ):
+        instance_names = []
+        for instance in instances:
+            if instance.state == old_state:
+                instance_names.append(instance.name)
+
+                instance.state = new_state
+                instance.state_message = new_state_message
+                await instance.update(session)
+        if instance_names:
+            logger.debug(
+                f"Marked instance {', '.join(instance_names)} {new_state} "
+                f"since {log_update_reason}"
+            )

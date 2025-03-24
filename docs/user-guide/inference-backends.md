@@ -23,8 +23,8 @@ The llama-box backend supports Linux, macOS and Windows (with CPU offloading onl
 ### Supported Models
 
 - LLMs: For supported LLMs, refer to the llama.cpp [README](https://github.com/ggerganov/llama.cpp#description).
-- Difussion Models: Supported models are listed in this [Hugging Face collection](https://huggingface.co/collections/gpustack/image-672dafeb2fa0d02dbe2539a9).
-- Reranker Models: Supported models can be found in this [Hugging Face collection](https://huggingface.co/collections/gpustack/reranker-6721a234527f6fcd90deedc4).
+- Diffussion Models: Supported models are listed in this [Hugging Face collection](https://huggingface.co/collections/gpustack/image-672dafeb2fa0d02dbe2539a9) or this [ModelScope collection](https://modelscope.cn/collections/Image-fab3d241f8a641).
+- Reranker Models: Supported models can be found in this [Hugging Face collection](https://huggingface.co/collections/gpustack/reranker-6721a234527f6fcd90deedc4) or this [ModelScope collection](https://modelscope.cn/collections/Reranker-7576210e79de4a).
 
 ### Supported Features
 
@@ -35,6 +35,16 @@ After enabling CPU offloading, GPUStack prioritizes loading as many layers as po
 #### Allow Distributed Inference Across Workers
 
 Enable distributed inference across multiple workers. The primary Model Instance will communicate with backend instances on one or more others workers, offloading computation tasks to them.
+
+#### Multimodal Language Models
+
+Llama-box supports the following multimodal language models. When using a vision language model, image inputs are supported in the chat completion API.
+
+- Qwen2-VL
+
+!!! Note
+
+    When deploying a vision language model, GPUStack downloads and uses the multimodal projector file with the pattern `*mmproj*.gguf` by default. If multiple files match the pattern, GPUStack selects the file with higher precision (e.g., `f32` over `f16`). If the default pattern does not match the projector file or you want to use a specific one, you can customize the multimodal projector file by setting the `--mmproj` parameter in the model configuration. You can specify the relative path to the projector file in the model source. This syntax acts as shorthand, and GPUStack will download the file from the source and normalize the path when using it.
 
 ### Parameters Reference
 
@@ -70,6 +80,25 @@ Please refer to the vLLM [documentation](https://docs.vllm.ai/en/stable/models/s
 #### Multimodal Language Models
 
 vLLM supports multimodal language models listed [here](https://docs.vllm.ai/en/stable/models/supported_models.html#multimodal-language-models). When users deploy a vision language model using the vLLM backend, image inputs are supported in the chat completion API.
+
+#### Distributed Inference Across Workers
+
+vLLM supports distributed inference across multiple workers using [Ray](https://ray.io). You can enable a Ray cluster in GPUStack by using the `--enable-ray` start parameter, allowing vLLM to run distributed inference across multiple workers.
+
+!!! warning "Known Limitations"
+
+    1. Both the GPUStack server and all participating workers must run on Linux.
+    2. Model files must be accessible at the same path on all participating workers. Currently, GPUStack downloads model files only to the main worker. You must either use a shared file system or manually copy the model files to the same path on all participating workers.
+    3. Each worker can only be assigned to one distributed vLLM model instance at a time.
+
+Auto-scheduling is supported with the following conditions:
+
+- Participating workers have the same number of GPUs.
+- All GPUs in the worker satisfy the gpu_memory_utilization(defaults to 0.9) requirement.
+- The total number of GPUs can be divided by the number of attention heads.
+- The total VRAM claim is greater than the estimated VRAM claim.
+
+If the above conditions are not met, the model instance will not be scheduled automatically. However, you can manually schedule it by selecting the desired workers/GPUs in the model configuration.
 
 ### Parameters Reference
 
@@ -111,6 +140,7 @@ The vox-box backend supports Linux, macOS and Windows platforms.
 | CosyVoice-300M-SFT              | text-to-speech | [Hugging Face](https://huggingface.co/FunAudioLLM/CosyVoice-300M-SFT), [ModelScope](https://modelscope.cn/models/iic/CosyVoice-300M-SFT)                            | Linux(ARM not supported), macOS, Windows(Not supported) |
 | CosyVoice-300M                  | text-to-speech | [Hugging Face](https://huggingface.co/FunAudioLLM/CosyVoice-300M), [ModelScope](https://modelscope.cn/models/iic/CosyVoice-300M)                                    | Linux(ARM not supported), macOS, Windows(Not supported) |
 | CosyVoice-300M-25Hz             | text-to-speech | [ModelScope](https://modelscope.cn/models/iic/CosyVoice-300M-25Hz)                                                                                                  | Linux(ARM not supported), macOS, Windows(Not supported) |
+| CosyVoice2-0.5B                 | text-to-speech | [Hugging Face](https://huggingface.co/FunAudioLLM/CosyVoice2-0.5B), [ModelScope](https://modelscope.cn/models/iic/CosyVoice2-0.5B)                                  | Linux(ARM not supported), macOS, Windows(Not supported) |
 
 ### Supported Features
 

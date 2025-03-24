@@ -20,24 +20,36 @@ class WorkerStatusCollector:
         self,
         worker_ip: str,
         worker_name: str,
+        worker_port: int,
         clientset: ClientSet = None,
         worker_manager=None,
         gpu_devices=None,
+        system_info=None,
     ):
         self._worker_name = worker_name
         self._hostname = socket.gethostname()
         self._worker_ip = worker_ip
+        self._worker_port = worker_port
         self._clientset = clientset
         self._worker_manager = worker_manager
 
-        detector_factory = (
-            DetectorFactory("custom", {"custom": Custom(gpu_devices)})
-            if gpu_devices
-            else None
-        )
-        self._detector_factory = (
-            detector_factory if detector_factory else DetectorFactory()
-        )
+        if gpu_devices and system_info:
+            self._detector_factory = DetectorFactory(
+                device="custom",
+                gpu_detectors={"custom": [Custom(gpu_devices=gpu_devices)]},
+                system_info_detector=Custom(system_info=system_info),
+            )
+        elif gpu_devices:
+            self._detector_factory = DetectorFactory(
+                device="custom",
+                gpu_detectors={"custom": [Custom(gpu_devices=gpu_devices)]},
+            )
+        elif system_info:
+            self._detector_factory = DetectorFactory(
+                system_info_detector=Custom(system_info=system_info)
+            )
+        else:
+            self._detector_factory = DetectorFactory()
 
     """A class for collecting worker status information."""
 
@@ -80,6 +92,7 @@ class WorkerStatusCollector:
             name=self._worker_name,
             hostname=self._hostname,
             ip=self._worker_ip,
+            port=self._worker_port,
             state=WorkerStateEnum.READY,
             status=status,
         )
@@ -147,7 +160,12 @@ class WorkerStatusCollector:
             if status.memory is not None:
                 status.memory.allocated = allocated.ram
             if status.gpu_devices is not None:
-                for ag, agv in allocated.vram.items():
-                    status.gpu_devices[ag].memory.allocated = agv
+                for i, device in enumerate(status.gpu_devices):
+                    if device.index in allocated.vram:
+                        status.gpu_devices[i].memory.allocated = allocated.vram[
+                            device.index
+                        ]
+                    else:
+                        status.gpu_devices[i].memory.allocated = 0
         except Exception as e:
             logger.error(f"Failed to inject allocated resources: {e}")

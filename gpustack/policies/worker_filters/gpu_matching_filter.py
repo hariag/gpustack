@@ -4,6 +4,7 @@ from gpustack.policies.base import WorkerFilter
 from gpustack.schemas.models import Model, ModelInstance
 from gpustack.schemas.workers import Worker
 from gpustack.server.db import get_engine
+from gpustack.utils.gpu import parse_gpu_ids_by_worker
 
 logger = logging.getLogger(__name__)
 
@@ -23,26 +24,25 @@ class GPUMatchingFilter(WorkerFilter):
             f"model {self._model.name}, filter gpus with gpu matching policy, instance {self._model_instance.name}"
         )
 
-        if self._model.gpu_selector is None:
+        if (
+            self._model.gpu_selector is None
+            or self._model.gpu_selector.gpu_ids is None
+            or len(self._model.gpu_selector.gpu_ids) == 0
+        ):
             return workers, []
+
+        gpu_ids_by_worker = parse_gpu_ids_by_worker(self._model.gpu_selector.gpu_ids)
+        seleted_workers = gpu_ids_by_worker.keys()
 
         candidates = []
         for worker in workers:
-            if worker.status.gpu_devices is None or len(worker.status.gpu_devices) == 0:
-                continue
-
-            if self._model.gpu_selector.worker_name != worker.name:
+            if worker.name not in seleted_workers:
                 continue
 
             gpu_candidates = []
             for gpu in worker.status.gpu_devices:
-                if self._model.gpu_selector.gpu_index != gpu.index:
-                    continue
-
-                if (
-                    self._model.gpu_selector.gpu_name is not None
-                    and self._model.gpu_selector.gpu_name != gpu.name
-                ):
+                id = f"{worker.name}:{gpu.type}:{gpu.index}"
+                if id not in self._model.gpu_selector.gpu_ids:
                     continue
 
                 gpu_candidates.append(gpu)

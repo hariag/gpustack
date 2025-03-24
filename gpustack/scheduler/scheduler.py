@@ -30,13 +30,12 @@ from gpustack.scheduler.queue import AsyncUniqueQueue
 from gpustack.policies.worker_filters.status_filter import StatusFilter
 from gpustack.schemas.workers import Worker
 from gpustack.schemas.models import (
-    BackendEnum,
+    CategoryEnum,
     DistributedServers,
     Model,
     ModelInstance,
     ModelInstanceStateEnum,
     SourceEnum,
-    get_backend,
     is_gguf_model,
     is_audio_model,
 )
@@ -46,6 +45,7 @@ from gpustack.scheduler.calculator import (
     GPUOffloadEnum,
     calculate_model_resource_claim,
 )
+from gpustack.utils.gpu import parse_gpu_ids_by_worker
 from gpustack.utils.hub import get_pretrained_config
 from gpustack.utils.task import run_in_thread
 
@@ -82,8 +82,10 @@ class Scheduler:
             asyncio.create_task(self._schedule_cycle())
 
             # scheduler job trigger by time interval.
-            trigger = IntervalTrigger(seconds=self._check_interval)
-            scheduler = AsyncIOScheduler()
+            trigger = IntervalTrigger(
+                seconds=self._check_interval, timezone=timezone.utc
+            )
+            scheduler = AsyncIOScheduler(timezone=timezone.utc)
             scheduler.add_job(
                 self._enqueue_pending_instances,
                 trigger=trigger,
@@ -120,7 +122,7 @@ class Scheduler:
         except Exception as e:
             logger.error(f"Failed to enqueue pending model instances: {e}")
 
-    async def _evaluate(self, instance: ModelInstance):
+    async def _evaluate(self, instance: ModelInstance):  # noqa: C901
         """
         Evaluate the model instance's metadata.
         """
@@ -146,6 +148,11 @@ class Scheduler:
 
                 if is_gguf_model(model):
                     await self._evaluate_gguf_model(session, model, instance)
+                    if await self.check_model_distributability(
+                        session, model, instance
+                    ):
+                        return
+
                 elif is_audio_model(model):
                     await self._evaluate_audio_model(session, model)
                 else:
@@ -164,6 +171,24 @@ class Scheduler:
                         f"Failed to update model instance: {ue}. Original error: {e}"
                     )
 
+    async def check_model_distributability(
+        self, session: AsyncSession, model: Model, instance: ModelInstance
+    ):
+        if (
+            not model.distributable
+            and model.gpu_selector
+            and model.gpu_selector.gpu_ids
+        ):
+            worker_gpu_ids = parse_gpu_ids_by_worker(model.gpu_selector.gpu_ids)
+            if len(worker_gpu_ids) > 1:
+                instance.state = ModelInstanceStateEnum.ERROR
+                instance.state_message = (
+                    "The model is not distributable to multiple workers."
+                )
+                await instance.update(session)
+                return True
+        return False
+
     async def _evaluate_gguf_model(
         self,
         session: AsyncSession,
@@ -179,20 +204,24 @@ class Scheduler:
         )
 
         should_update = False
-        if (
-            task_output.resource_claim_estimate.embeddingOnly
-            and not model.embedding_only
-        ):
+        if task_output.resource_claim_estimate.reranking and not model.categories:
             should_update = True
+            model.categories = [CategoryEnum.RERANKER]
+            model.reranker = True
+
+        if task_output.resource_claim_estimate.embeddingOnly and not model.categories:
+            should_update = True
+            model.categories = [CategoryEnum.EMBEDDING]
             model.embedding_only = True
 
-        if task_output.resource_claim_estimate.imageOnly and not model.image_only:
+        if task_output.resource_claim_estimate.imageOnly and not model.categories:
             should_update = True
+            model.categories = [CategoryEnum.IMAGE]
             model.image_only = True
 
-        if task_output.resource_claim_estimate.reranking and not model.reranker:
+        if not model.categories:
             should_update = True
-            model.reranker = True
+            model.categories = [CategoryEnum.LLM]
 
         if (
             task_output.resource_claim_estimate.distributable
@@ -200,6 +229,16 @@ class Scheduler:
         ):
             should_update = True
             model.distributable = True
+
+        if model.gpu_selector and model.gpu_selector.gpu_ids:
+            worker_gpu_ids = parse_gpu_ids_by_worker(model.gpu_selector.gpu_ids)
+            if (
+                len(worker_gpu_ids) > 1
+                and model.distributable
+                and not model.distributed_inference_across_workers
+            ):
+                should_update = True
+                model.distributed_inference_across_workers = True
 
         if should_update:
             await model.update(session)
@@ -222,7 +261,16 @@ class Scheduler:
         architectures = getattr(pretrained_config, "architectures", []) or []
 
         # https://docs.vllm.ai/en/latest/models/supported_models.html#text-embedding
-        supported_embedding_architectures = ["Gemma2Model", "MistralModel"]
+        supported_embedding_architectures = [
+            "BertModel",
+            "Gemma2Model",
+            "MistralModel",
+            "LlamaModel",
+            "Qwen2Model",
+            "RobertaModel",
+            "RobertaForMaskedLM",
+            "XLMRobertaModel",
+        ]
         is_embedding_model = False
 
         for architecture in architectures:
@@ -231,9 +279,14 @@ class Scheduler:
                 break
 
         should_update = False
-        if is_embedding_model and not model.embedding_only:
+        if is_embedding_model and not model.categories:
             should_update = True
+            model.categories = [CategoryEnum.EMBEDDING]
             model.embedding_only = True
+
+        if not model.categories:
+            should_update = True
+            model.categories = [CategoryEnum.LLM]
 
         if should_update:
             await model.update(session)
@@ -244,7 +297,7 @@ class Scheduler:
         model: Model,
     ):
         try:
-            from vox_box.elstimator.estimate import estimate_model
+            from vox_box.estimator.estimate import estimate_model
             from vox_box.config import Config as VoxBoxConfig
         except ImportError:
             raise Exception("vox_box is not installed.")
@@ -272,11 +325,16 @@ class Scheduler:
 
         task_type = model_dict.get("task_type")
         if task_type == "tts":
+            model.categories = [CategoryEnum.TEXT_TO_SPEECH]
             model.text_to_speech = True
         elif task_type == "stt":
+            model.categories = [CategoryEnum.SPEECH_TO_TEXT]
             model.speech_to_text = True
 
-        if model.text_to_speech or model.speech_to_text:
+        if model.categories and (
+            CategoryEnum.TEXT_TO_SPEECH in model.categories
+            or CategoryEnum.SPEECH_TO_TEXT in model.categories
+        ):
             await model.update(session)
 
     def _should_schedule(self, instance: ModelInstance) -> bool:
@@ -360,7 +418,12 @@ class Scheduler:
                     self._config, model, instance, self._vox_box_cache_dir
                 )
             else:
-                candidates_selector = VLLMResourceFitSelector(model, instance)
+                try:
+                    candidates_selector = VLLMResourceFitSelector(
+                        self._config, model, instance
+                    )
+                except Exception as e:
+                    return None, [f"VLLM resource fit selector init failed: {e}"]
 
             candidates = await candidates_selector.select_candidates(workers)
 
@@ -370,10 +433,10 @@ class Scheduler:
             candidate = self.pick_highest_score_candidate(candidates)
 
             if candidate is None and len(workers) > 0:
-                resource_fit_message = "No workers meet the resource requirements."
-                if get_backend(model) == BackendEnum.VLLM:
-                    resource_fit_message += " Consider adjusting parameters such as --gpu-memory-utilization (default: 0.9), --max-model-len, or --enforce-eager to lower the resource demands."
-                messages.append(resource_fit_message)
+                resource_fit_messages = candidates_selector.get_messages() or [
+                    "No workers meet the resource requirements."
+                ]
+                messages.extend(resource_fit_messages)
             return candidate, messages
         except Exception as e:
             state_message = (
@@ -438,7 +501,8 @@ class Scheduler:
                 )
                 model_instance.gpu_indexes = candidate.gpu_indexes
                 model_instance.distributed_servers = DistributedServers(
-                    rpc_servers=candidate.rpc_servers
+                    rpc_servers=candidate.rpc_servers,
+                    ray_actors=candidate.ray_actors,
                 )
 
                 await model_instance.update(session, model_instance)

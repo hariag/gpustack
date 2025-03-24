@@ -9,7 +9,9 @@ from gpustack.schemas.workers import (
     MemoryInfo,
     VendorEnum,
 )
+from gpustack.utils import platform
 from gpustack.utils.command import is_command_available
+from gpustack.utils.convert import safe_float, safe_int
 
 # match |, / and space
 split_pattern = re.compile(r"[|/\s]+")
@@ -105,10 +107,11 @@ class NPUSMI(GPUDetector):
                 continue
 
             if line_num == 1:
-                npu = int(arr[header_indexes.get("NPU")])
+                npu = safe_int(arr[header_indexes.get("NPU")])
                 device.name = arr[header_indexes.get("Name")]
-                device.temperature = float(arr[header_indexes.get("Temp(C)")])
+                device.temperature = safe_float(arr[header_indexes.get("Temp(C)")])
                 device.vendor = VendorEnum.Huawei.value
+                device.type = platform.DeviceTypeEnum.NPU.value
 
             if line_num == 2:
 
@@ -118,13 +121,13 @@ class NPUSMI(GPUDetector):
                     vram_used_index = vram_total_index + 1
                     vram_total_index = vram_used_index + 1
 
-                vram_used = int(arr[vram_used_index]) * 1024 * 1024
-                vram_total = int(arr[vram_total_index]) * 1024 * 1024
+                vram_used = safe_int(arr[vram_used_index]) * 1024 * 1024
+                vram_total = safe_int(arr[vram_total_index]) * 1024 * 1024
                 utilization_rate = vram_used / vram_total * 100 if vram_total > 0 else 0
 
-                chip = int(arr[header_indexes.get("Chip")])
+                chip = safe_int(arr[header_indexes.get("Chip")])
                 device.core = GPUCoreInfo(
-                    utilization_rate=float(arr[header_indexes.get("AICore(%)")]),
+                    utilization_rate=safe_float(arr[header_indexes.get("AICore(%)")]),
                     total=0,
                 )
                 device.memory = MemoryInfo(

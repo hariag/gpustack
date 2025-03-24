@@ -23,7 +23,7 @@ from gpustack.schemas.model_usage import ModelUsage, OperationEnum
 from gpustack.schemas.models import Model
 from gpustack.schemas.users import User
 from gpustack.security import JWT_TOKEN_EXPIRE_MINUTES, JWTManager
-from gpustack.server.auth import SESSION_COOKIE_NAME
+from gpustack.api.auth import SESSION_COOKIE_NAME
 from gpustack.server.db import get_engine
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -41,36 +41,43 @@ class ModelUsageMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
         if response.status_code == 200:
-            if request.url.path == "/v1-openai/chat/completions":
+            path = request.url.path
+            if path == "/v1-openai/chat/completions" or path == "/v1/chat/completions":
                 return await process_request(
                     request, response, ChatCompletion, OperationEnum.CHAT_COMPLETION
                 )
-            elif request.url.path == "/v1-openai/completions":
+            elif path == "/v1-openai/completions" or path == "/v1/completions":
                 return await process_request(
                     request, response, Completion, OperationEnum.COMPLETION
                 )
-            elif request.url.path == "/v1-openai/embeddings":
+            elif path == "/v1-openai/embeddings" or path == "/v1/embeddings":
                 return await process_request(
                     request,
                     response,
                     CreateEmbeddingResponse,
                     OperationEnum.EMBEDDING,
                 )
-            elif request.url.path == "/v1-openai/images/generations":
+            elif (
+                path == "/v1-openai/images/generations"
+                or path == "/v1/images/generations"
+            ):
                 return await process_request(
                     request,
                     response,
                     ImagesResponse,
                     OperationEnum.IMAGE_GENERATION,
                 )
-            elif request.url.path == "/v1-openai/audio/speech":
+            elif path == "/v1-openai/audio/speech" or path == "/v1/audio/speech":
                 return await process_request(
                     request,
                     response,
                     FileResponse,
                     OperationEnum.AUDIO_SPEECH,
                 )
-            elif request.url.path == "/v1-openai/audio/transcriptions":
+            elif (
+                path == "/v1-openai/audio/transcriptions"
+                or path == "/v1/audio/transcriptions"
+            ):
                 return await process_request(
                     request,
                     response,
@@ -205,6 +212,11 @@ async def process_chunk(
     # each chunk may contain multiple data lines
     lines = chunk.decode("utf-8").split("\n\n")
     for line in lines[:-1]:
+        if not line.startswith('data: '):
+            # skip non-data SSE messages
+            yield f"{line}\n\n".encode("utf-8")
+            continue
+
         data = line.split('data: ')[-1]
         if data.startswith('[DONE]'):
             yield "data: [DONE]\n\n".encode("utf-8")
@@ -292,7 +304,7 @@ class RefreshTokenMiddleware(BaseHTTPMiddleware):
 
 
 def is_usage_chunk(
-    chunk: Union[ChatCompletionChunk, Completion, ImageGenerationChunk]
+    chunk: Union[ChatCompletionChunk, Completion, ImageGenerationChunk],
 ) -> bool:
     choices = getattr(chunk, "choices", None)
 

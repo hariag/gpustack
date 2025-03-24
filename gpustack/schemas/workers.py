@@ -1,11 +1,11 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Dict, Optional
 from pydantic import ConfigDict, BaseModel
 from sqlmodel import Field, SQLModel, JSON, Column
 
 from gpustack.mixins import BaseModelMixin
-from gpustack.schemas.common import PaginatedList, pydantic_column_type
+from gpustack.schemas.common import PaginatedList, UTCDateTime, pydantic_column_type
 from typing import List
 from sqlalchemy.orm import declarative_base
 
@@ -44,6 +44,8 @@ class GPUDeviceInfo(BaseModel):
     core: Optional[GPUCoreInfo] = Field(sa_column=Column(JSON), default=None)
     memory: Optional[MemoryInfo] = Field(sa_column=Column(JSON), default=None)
     temperature: Optional[float] = Field(default=None)  # in celsius
+    labels: Dict[str, str] = Field(sa_column=Column(JSON), default={})
+    type: Optional[str] = Field(default="")
 
 
 GPUDevicesInfo = List[GPUDeviceInfo]
@@ -54,6 +56,8 @@ class VendorEnum(str, Enum):
     MTHREADS = "Moore Threads"
     Apple = "Apple"
     Huawei = "Huawei"
+    AMD = "AMD"
+    Hygon = "Hygon"
 
 
 class MountPoint(BaseModel):
@@ -61,9 +65,9 @@ class MountPoint(BaseModel):
     mount_point: str = Field(default="")
     mount_from: str = Field(default="")
     total: int = Field(default=None)  # in bytes
-    used: int = Field(default=None)
-    free: int = Field(default=None)
-    available: int = Field(default=None)
+    used: Optional[int] = Field(default=None)
+    free: Optional[int] = Field(default=None)
+    available: Optional[int] = Field(default=None)
 
 
 FileSystemInfo = List[MountPoint]
@@ -100,6 +104,7 @@ class RPCServer(BaseModel):
 class WorkerStateEnum(str, Enum):
     NOT_READY = "not_ready"
     READY = "ready"
+    UNREACHABLE = "unreachable"
 
 
 class SystemInfo(BaseModel):
@@ -125,6 +130,7 @@ class WorkerBase(SQLModel):
     name: str = Field(index=True, unique=True)
     hostname: str
     ip: str
+    port: int
     labels: Dict[str, str] = Field(sa_column=Column(JSON), default={})
 
     system_reserved: Optional[SystemReserved] = Field(
@@ -135,6 +141,39 @@ class WorkerBase(SQLModel):
     status: Optional[WorkerStatus] = Field(
         sa_column=Column(pydantic_column_type(WorkerStatus))
     )
+    unreachable: bool = False
+    heartbeat_time: Optional[datetime] = Field(
+        sa_column=Column(UTCDateTime), default=None
+    )
+
+    def compute_state(self, worker_offline_timeout=60):
+        now = int(datetime.now(timezone.utc).timestamp())
+        heartbeat_timestamp = (
+            self.heartbeat_time.timestamp() if self.heartbeat_time else None
+        )
+
+        if (
+            heartbeat_timestamp is None
+            or now - heartbeat_timestamp > worker_offline_timeout
+        ):
+            self.state = WorkerStateEnum.NOT_READY
+            self.state_message = "Heartbeat lost"
+            return
+
+        if self.unreachable:
+            healthz_url = f"http://{self.ip}:{self.port}/healthz"
+            msg = (
+                "Server cannot access the "
+                f"worker's health check endpoint at {healthz_url}. "
+                "Please verify the port requirements in the "
+                "<a href='https://docs.gpustack.ai/latest/installation/installation-requirements/'>documentation</a>"
+            )
+            self.state = WorkerStateEnum.UNREACHABLE
+            self.state_message = msg
+            return
+
+        self.state = WorkerStateEnum.READY
+        self.state_message = None
 
 
 class Worker(WorkerBase, BaseModelMixin, table=True):

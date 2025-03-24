@@ -8,7 +8,9 @@ from gpustack.schemas.workers import (
     MemoryInfo,
     VendorEnum,
 )
+from gpustack.utils import platform
 from gpustack.utils.command import is_command_available
+from gpustack.utils.convert import safe_float, safe_int
 
 
 class NvidiaSMI(GPUDetector):
@@ -18,6 +20,9 @@ class NvidiaSMI(GPUDetector):
     def gather_gpu_info(self) -> GPUDevicesInfo:
         command = self._command_gather_gpu()
         results = self._run_command(command)
+        if results is None:
+            return []
+
         return self.decode_gpu_devices(results)
 
     def decode_gpu_devices(self, result) -> GPUDevicesInfo:  # noqa: C901
@@ -36,15 +41,20 @@ class NvidiaSMI(GPUDetector):
             index, name, memory_total, memory_used, utilization_gpu, temperature_gpu = (
                 row
             )
+
+            index = safe_int(index)
+            name = name.strip()
             # Convert MiB to bytes
-            memory_total = int(memory_total.split()[0]) * 1024 * 1024
+            memory_total = safe_int(memory_total.split()[0]) * 1024 * 1024
             # Convert MiB to bytes
-            memory_used = int(memory_used.split()[0]) * 1024 * 1024
-            utilization_gpu = float(utilization_gpu.split()[0])  # Remove the '%' sign
-            temperature_gpu = float(temperature_gpu)
+            memory_used = safe_int(memory_used.split()[0]) * 1024 * 1024
+            utilization_gpu = safe_float(
+                utilization_gpu.split()[0]
+            )  # Remove the '%' sign
+            temperature_gpu = safe_float(temperature_gpu)
 
             device = GPUDeviceInfo(
-                index=int(index),
+                index=index,
                 name=name,
                 vendor=VendorEnum.NVIDIA.value,
                 memory=MemoryInfo(
@@ -60,6 +70,7 @@ class NvidiaSMI(GPUDetector):
                     total=0,  # Total cores information is not provided by nvidia-smi
                 ),
                 temperature=temperature_gpu,
+                type=platform.DeviceTypeEnum.CUDA.value,
             )
             devices.append(device)
         return devices
@@ -68,13 +79,19 @@ class NvidiaSMI(GPUDetector):
         result = None
         try:
             result = subprocess.run(
-                command, capture_output=True, text=True, check=True, encoding="utf-8"
+                command, capture_output=True, text=True, encoding="utf-8"
             )
+
+            if result is None or result.stdout is None:
+                return None
+
+            output = result.stdout
+            if "no devices" in output.lower():
+                return None
 
             if result.returncode != 0:
                 raise Exception(f"Unexpected return code: {result.returncode}")
 
-            output = result.stdout
             if output == "" or output is None:
                 raise Exception(f"Output is empty, return code: {result.returncode}")
 

@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 import multiprocessing
 import os
 import logging
@@ -12,7 +13,10 @@ from gpustack.api.exceptions import (
 from gpustack.client import ClientSet
 from gpustack.config.config import Config
 from gpustack.detectors.custom.custom import Custom
-from gpustack.schemas.workers import SystemReserved, Worker, WorkerStateEnum
+from gpustack.schemas.workers import (
+    SystemReserved,
+    Worker,
+)
 from gpustack.utils import network
 from gpustack.utils import platform
 from gpustack.utils.process import terminate_process_tree
@@ -33,14 +37,18 @@ class WorkerManager:
         clientset: ClientSet,
         cfg: Config,
     ):
+        self._cfg = cfg
         self._registration_completed = False
         self._worker_name = worker_name
         self._worker_ip = worker_ip
+        self._worker_port = cfg.worker_port
         self._clientset = clientset
         self._system_reserved = system_reserved
         self._rpc_servers: Dict[int, RPCServerProcessInfo] = {}
         self._rpc_server_log_dir = f"{cfg.log_dir}/rpc_server"
+        self._rpc_server_args = cfg.rpc_server_args
         self._gpu_devices = cfg.get_gpu_devices()
+        self._system_info = cfg.get_system_info()
 
         os.makedirs(self._rpc_server_log_dir, exist_ok=True)
 
@@ -58,9 +66,11 @@ class WorkerManager:
         collector = WorkerStatusCollector(
             worker_ip=self._worker_ip,
             worker_name=self._worker_name,
+            worker_port=self._worker_port,
             clientset=self._clientset,
             worker_manager=self,
             gpu_devices=self._gpu_devices,
+            system_info=self._system_info,
         )
 
         try:
@@ -74,12 +84,16 @@ class WorkerManager:
             logger.error(f"Worker {self._worker_name} not found")
             return
 
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+
         current = result.items[0]
         worker.name = current.name
         worker.id = current.id
         worker.labels = current.labels
-        worker.state = WorkerStateEnum.READY
+        worker.state = current.state
+        worker.unreachable = current.unreachable
         worker.system_reserved = self._system_reserved
+        worker.heartbeat_time = now
 
         try:
             result = self._clientset.workers.update(id=current.id, model_update=worker)
@@ -117,9 +131,11 @@ class WorkerManager:
             collector = WorkerStatusCollector(
                 worker_ip=self._worker_ip,
                 worker_name=self._worker_name,
+                worker_port=self._worker_port,
                 clientset=self._clientset,
                 worker_manager=self,
                 gpu_devices=self._gpu_devices,
+                system_info=self._system_info,
             )
             worker = collector.collect()
 
@@ -147,7 +163,7 @@ class WorkerManager:
     def _start_rpc_servers(self):
         try:
             detector_factory = (
-                DetectorFactory("custom", {"custom": Custom(self._gpu_devices)})
+                DetectorFactory("custom", {"custom": [Custom(self._gpu_devices)]})
                 if self._gpu_devices
                 else DetectorFactory()
             )
@@ -181,10 +197,19 @@ class WorkerManager:
                 self._rpc_servers.pop(gpu_device.index)
 
             log_file_path = f"{self._rpc_server_log_dir}/gpu-{gpu_device.index}.log"
-            port = network.get_free_port(start=50000, end=51024)
+            port = network.get_free_port(
+                port_range=self._cfg.rpc_server_port_range,
+                unavailable_ports=self.get_occupied_ports(),
+            )
             process = multiprocessing.Process(
                 target=RPCServer.start,
-                args=(port, gpu_device.index, gpu_device.vendor, log_file_path),
+                args=(
+                    port,
+                    gpu_device.index,
+                    gpu_device.vendor,
+                    log_file_path,
+                    self._rpc_server_args,
+                ),
             )
 
             process.daemon = True
@@ -199,3 +224,6 @@ class WorkerManager:
 
     def get_rpc_servers(self) -> Dict[int, RPCServerProcessInfo]:
         return self._rpc_servers
+
+    def get_occupied_ports(self) -> set[int]:
+        return {server.port for server in self._rpc_servers.values()}

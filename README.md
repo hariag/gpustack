@@ -1,15 +1,17 @@
 <br>
+
 <p align="center">
-    <img alt="GPUStack" src="./docs/assets/gpustack-logo.png" width="300px"/>
+    <img alt="GPUStack" src="https://raw.githubusercontent.com/gpustack/gpustack/main/docs/assets/gpustack-logo.png" width="300px"/>
 </p>
 <br>
+
 <p align="center">
     <a href="https://docs.gpustack.ai" target="_blank">
         <img alt="Documentation" src="https://img.shields.io/badge/Docs-GPUStack-blue?logo=readthedocs&logoColor=white"></a>
     <a href="./LICENSE" target="_blank">
         <img alt="License" src="https://img.shields.io/github/license/gpustack/gpustack?logo=github&logoColor=white&label=License&color=blue"></a>
     <a href="./docs/assets/wechat-assistant.png" target="_blank">
-        <img alt="WeChat" src="https://img.shields.io/badge/Wechat-GPUStack-blue?logo=wechat&logoColor=white"></a>
+        <img alt="WeChat" src="https://img.shields.io/badge/微信群-GPUStack-blue?logo=wechat&logoColor=white"></a>
     <a href="https://discord.gg/VXYJzuaqwD" target="_blank">
         <img alt="Discord" src="https://img.shields.io/badge/Discord-GPUStack-blue?logo=discord&logoColor=white"></a>
     <a href="https://twitter.com/intent/follow?screen_name=gpustack_ai" target="_blank">
@@ -17,17 +19,24 @@
 </p>
 <br>
 
-![demo](docs/assets/gpustack-demo.gif)
+<p align="center">
+  <a href="./README.md">English</a> |
+  <a href="./README_CN.md">简体中文</a>
+</p>
+
+<br>
+
+![demo](https://raw.githubusercontent.com/gpustack/gpustack/main/docs/assets/gpustack-demo.gif)
 
 GPUStack is an open-source GPU cluster manager for running AI models.
 
 ### Key Features
 
-- **Broad Hardware Compatibility:** Run with different brands of GPUs in Apple MacBooks, Windows PCs, and Linux servers.
+- **Broad Hardware Compatibility:** Run with different brands of GPUs in Apple Macs, Windows PCs, and Linux servers.
 - **Broad Model Support:** From LLMs and diffusion models to audio, embedding, and reranker models.
 - **Scales with Your GPU Inventory:** Easily add more GPUs or nodes to scale up your operations.
 - **Distributed Inference**: Supports both single-node multi-GPU and multi-node inference and serving.
-- **Multiple Inference Backends**: Supports llama-box (llama.cpp) and vLLM as the inference backends.
+- **Multiple Inference Backends**: Supports llama-box (llama.cpp & stable-diffusion.cpp), vox-box and vLLM as the inference backends.
 - **Lightweight Python Package:** Minimal dependencies and operational overhead.
 - **OpenAI-compatible APIs:** Serve APIs that are compatible with OpenAI standards.
 - **User and API key management:** Simplified management of users and API keys.
@@ -38,7 +47,7 @@ GPUStack is an open-source GPU cluster manager for running AI models.
 
 ### Linux or macOS
 
-GPUStack provides a script to install it as a service on systemd or launchd based systems. To install GPUStack using this method, just run:
+GPUStack provides a script to install it as a service on systemd or launchd based systems with default port 80. To install GPUStack using this method, just run:
 
 ```bash
 curl -sfL https://get.gpustack.ai | sh -s -
@@ -78,7 +87,7 @@ gpustack draw hf.co/gpustack/stable-diffusion-v3-5-large-turbo-GGUF:stable-diffu
 
 Once the command completes, the generated image will appear in the default viewer. You can experiment with the prompt and CLI options to customize the output.
 
-![Generated Image](docs/assets/quickstart-minion.png)
+![Generated Image](https://raw.githubusercontent.com/gpustack/gpustack/main/docs/assets/quickstart-minion.png)
 
 3. Open `http://myserver` in the browser to access the GPUStack UI. Log in to GPUStack with username `admin` and the default password. You can run the following command to get the password for the default setup:
 
@@ -94,9 +103,9 @@ cat /var/lib/gpustack/initial_admin_password
 Get-Content -Path "$env:APPDATA\gpustack\initial_admin_password" -Raw
 ```
 
-4. Click `Playground` in the navigation menu. Now you can chat with the LLM in the UI playground.
+4. Click `Playground - Chat` in the navigation menu. Now you can chat with the LLM in the UI playground.
 
-![Playground Screenshot](docs/assets/playground-screenshot.png)
+![Playground Screenshot](https://raw.githubusercontent.com/gpustack/gpustack/main/docs/assets/playground-screenshot.png)
 
 5. Click `API Keys` in the navigation menu, then click the `New API Key` button.
 
@@ -137,12 +146,13 @@ curl http://myserver/v1-openai/chat/completions \
 
 - [x] Apple Metal (M-series chips)
 - [x] NVIDIA CUDA ([Compute Capability](https://developer.nvidia.com/cuda-gpus) 6.0 and above)
+- [x] AMD ROCm
 - [x] Ascend CANN
 - [x] Moore Threads MUSA
+- [x] Hygon DTK
 
 We plan to support the following accelerators in future releases.
 
-- [ ] AMD ROCm
 - [ ] Intel oneAPI
 - [ ] Qualcomm AI Engine
 
@@ -165,7 +175,8 @@ GPUStack uses [llama-box](https://github.com/gpustack/llama-box) (bundled [llama
 | **Large Language Models(LLMs)**  | [Qwen](https://huggingface.co/models?search=Qwen/Qwen), [LLaMA](https://huggingface.co/meta-llama), [Mistral](https://huggingface.co/mistralai), [Deepseek](https://huggingface.co/models?search=deepseek-ai/deepseek), [Phi](https://huggingface.co/models?search=microsoft/phi), [Yi](https://huggingface.co/models?search=01-ai/Yi)       |
 | **Vision Language Models(VLMs)** | [Llama3.2-Vision](https://huggingface.co/models?pipeline_tag=image-text-to-text&search=llama3.2), [Pixtral](https://huggingface.co/models?search=pixtral) , [Qwen2-VL](https://huggingface.co/models?search=Qwen/Qwen2-VL), [LLaVA](https://huggingface.co/models?search=llava), [InternVL2](https://huggingface.co/models?search=internvl2) |
 | **Diffusion Models**             | [Stable Diffusion](https://huggingface.co/models?search=gpustack/stable-diffusion), [FLUX](https://huggingface.co/models?search=gpustack/flux)                                                                                                                                                                                               |
-| **Rerankers**                    | [GTE](https://huggingface.co/gpustack/gte-multilingual-reranker-base-GGUF), [BCE](https://huggingface.co/gpustack/bce-reranker-base_v1-GGUF), [BGE](https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF), [Jina](https://huggingface.co/models?search=gpustack/jina)                                                                     |
+| **Embedding Models**             | [BGE](https://huggingface.co/gpustack/bge-m3-GGUF), [BCE](https://huggingface.co/gpustack/bce-embedding-base_v1-GGUF), [Jina](https://huggingface.co/models?search=gpustack/jina-embeddings)                                                                                                                                                 |
+| **Reranker Models**              | [BGE](https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF), [BCE](https://huggingface.co/gpustack/bce-reranker-base_v1-GGUF), [Jina](https://huggingface.co/models?search=gpustack/jina-reranker)                                                                                                                                        |
 | **Audio Models**                 | [Whisper](https://huggingface.co/models?search=Systran/faster) (speech-to-text), [CosyVoice](https://huggingface.co/models?search=FunAudioLLM/CosyVoice) (text-to-speech)                                                                                                                                                                    |
 
 For full list of supported models, please refer to the supported models section in the [inference backends](https://docs.gpustack.ai/latest/user-guide/inference-backends/) documentation.
@@ -208,7 +219,7 @@ Please see the [official docs site](https://docs.gpustack.ai) for complete docum
 
 ## Build
 
-1. Install `python 3.10+`.
+1. Install Python (version 3.10 to 3.12).
 
 2. Run `make build`.
 
@@ -217,6 +228,10 @@ You can find the built wheel package in `dist` directory.
 ## Contributing
 
 Please read the [Contributing Guide](./docs/contributing.md) if you're interested in contributing to GPUStack.
+
+## Join Community
+
+Any issues or have suggestions, feel free to join our [Community](https://discord.gg/VXYJzuaqwD) for support.
 
 ## License
 
